@@ -1,0 +1,11 @@
+[package]
+name = "AdventOfCode2024"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+itertools = "0.13.0"
+
+[[bin]]
+name = "day01"
+path = "day01.rs"
