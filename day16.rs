@@ -1,8 +1,10 @@
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::hash::Hash;
 use std::io;
 use std::ops::Add;
+
+use itertools::Itertools;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct Pos {
@@ -55,24 +57,27 @@ impl Dir {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct Player {
-    score: usize,
-    pos: Pos,
-    dir: Dir,
+type Score = usize;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct State {
+    pos: Pos,  // Where are we
+    dir: Dir,  // Which direction are we facing upon entering this location
 }
 
-impl Player {
-    fn adjacents(&self) -> impl Iterator<Item = Self> {
+impl State {
+    fn adjacents(&self) -> impl Iterator<Item = (Self, Score)> {
         let cw_dir = self.dir.turn_cw();
         let ccw_dir = self.dir.turn_ccw();
-        [ // 3 possible movements:
-            Player { score: self.score + 1, pos: self.pos + self.dir.pos(), dir: self.dir }, // Move one space
-            Player { score: self.score + 1001, pos: self.pos + cw_dir.pos(), dir: cw_dir }, // Turn CW
-            Player { score: self.score + 1001, pos: self.pos + ccw_dir.pos(), dir: ccw_dir }, // Turn CCw
+        [
+            (State { pos: self.pos + self.dir.pos(), dir: self.dir }, 1), // Move one space
+            (State { pos: self.pos + cw_dir.pos(), dir: cw_dir }, 1001), // Turn CW + move
+            (State { pos: self.pos + ccw_dir.pos(), dir: ccw_dir }, 1001), // Turn CCw + move
         ].into_iter()
     }
 }
+
+type Path = Vec<State>;
 
 #[derive(Debug)]
 struct Maze {
@@ -106,53 +111,72 @@ impl Maze {
         Self { spaces, start, end }
     }
 
-    fn adjacents(&self, player: Player) -> impl Iterator<Item = Player> + use<'_> {
-        player.adjacents().filter(|p| self.spaces.contains(&p.pos))
+    fn next_moves(&self, player: State) -> impl Iterator<Item = (State, Score)> + use<'_> {
+        player.adjacents().filter(|(p, _)| self.spaces.contains(&p.pos))
     }
 
-    fn shortest_path<F>(&self, start: Player, end: F) -> Player
-    where
-        F: FnOnce(Pos) -> bool + Copy,
-    {
-        // Dijkstra's algorithm!
-        let mut unvisited: HashSet<Pos> = self.spaces.clone();
-        let mut dist: HashMap<Pos, Player> = HashMap::new();
-        dist.insert(start.pos, start);
-
-        loop {
-            let candidates: HashSet<Pos> = unvisited
-                .intersection(&dist.keys().copied().collect())
-                .copied()
-                .collect();
-            let current = *candidates
-                .iter()
-                .min_by_key(|&p| dist.get(p).unwrap().score)
-                .unwrap();
-            let cur_player = *dist.get(&current).unwrap();
-            if end(current) {
-                return cur_player;
+    fn shortest_paths(&self, start: State, end: Pos) -> Option<(Score, Vec<Path>)> {
+        let mut min_scores: HashMap<State, Score> = HashMap::new();
+        let mut next_moves: BinaryHeap<Reverse<(Score, State)>> = BinaryHeap::new();
+        next_moves.push(Reverse((0, start)));
+        let mut prev_states: HashMap<State, HashSet<State>> = HashMap::new();
+        let mut end_state = None;
+        while let Some(Reverse((score, current))) = next_moves.pop() {
+            if current.pos == end {
+                end_state = Some((current, score));
+                break;
             }
-            for nbor in self
-                .adjacents(cur_player)
-                .filter(|player| unvisited.contains(&player.pos))
-            {
-                let old_nbor = dist.get(&nbor.pos);
-                if old_nbor.is_none() || nbor.score < old_nbor.unwrap().score {
-                    dist.insert(nbor.pos, nbor);
+            for (next, d_score) in self.next_moves(current) {
+                let old_score = *min_scores.get(&next).unwrap_or(&Score::MAX);
+                let new_score = score + d_score;
+                if new_score < old_score {
+                    min_scores.insert(next, new_score);
+                    next_moves.push(Reverse((new_score, next)));
+                    prev_states.insert(next, HashSet::new());
+                }
+                if new_score <= old_score {
+                    prev_states.entry(next).and_modify(|set| { set.insert(current); });
                 }
             }
-            unvisited.remove(&current);
+        }
+
+        fn build_rev_paths(state: State, start: State, prev_states: &HashMap<State, HashSet<State>>) -> Vec<Path> {
+            if state == start {
+                return vec![vec![state]];
+            }
+            let mut ret = vec![];
+            for prev in &prev_states[&state] {
+                for path in build_rev_paths(*prev, start, prev_states) {
+                    let mut new_path = path.to_vec();
+                    new_path.push(state);
+                    ret.push(new_path)
+                }
+            }
+            ret
+        }
+
+        match end_state {
+            None => None,
+            Some((state, score)) => Some(
+                (score, build_rev_paths(state, start, &prev_states))
+            ),
         }
     }
+
 }
 
 fn main() {
     let maze = Maze::parse(io::stdin().lines().map(Result::unwrap));
-    let start = Player { pos: maze.start, dir: Dir::East, score: 0 };
+    let start = State { pos: maze.start, dir: Dir::East };
 
-    let part1 = maze.shortest_path(start, |pos| pos == maze.end);
-    println!("Part 1: {}", part1.score);
-    // 79412 is too high
-
-    // println!("Part 2: {}", garden.regions.iter().map(|r| r.area() * r.sides()).sum::<usize>());
+    let (min_score, min_paths) = maze.shortest_paths(start, maze.end).unwrap();
+    println!("Part 1: {}", min_score);
+    println!("Part 2: {}", min_paths
+        .iter()
+        .map(|path| path.iter())
+        .flatten()
+        .map(|state| state.pos)
+        .unique()
+        .count()
+    );
 }
